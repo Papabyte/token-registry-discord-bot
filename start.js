@@ -135,13 +135,13 @@ async function announceAddedSupport(author, amount, asset, symbol, drawer){
 	var lockTime = drawer ? " locked for " + drawer + " day" : "";
 	if (drawer && drawer > 1)
 		lockTime+="s";
-	var announcement = author + " adds " + convertToGbString(amount) + " to supporting `" + symbol + "` for `" + asset+ "`" + lockTime +"\n";
+	var announcement = author + " adds " + convertToGbString(amount) + " to supporting symbol `" + symbol + "` for `" + asset+ "`" + lockTime +"\n";
 	announcement += await getNewRelationStateAnnouncement(asset, symbol);
 	sendToDiscord(announcement);
 }
 
 async function announceRemovedSupport(author, amount, asset, symbol){
-	var announcement = author + " withdraws " + convertToGbString(amount) + " from supporting `" + symbol + "` for `" + asset + "`\n";
+	var announcement = author + " withdraws " + convertToGbString(amount) + " from supporting symbol `" + symbol + "` for `" + asset + "`\n";
 	announcement += await getNewRelationStateAnnouncement(asset, symbol);
 	sendToDiscord(announcement);
 }
@@ -150,9 +150,9 @@ async function getNewRelationStateAnnouncement(asset, symbol){
 	const objRelationState = await getNewStateForRelation(asset, symbol);
 	console.log(objRelationState);
 	var announcement = "";
-	announcement += "Support for `" + symbol + "` attributed to `" + asset +"`: " + convertToGbString(objRelationState.support || 0) + "\n";
+	announcement += "Support for attributing symbol `" + symbol + "` to `" + asset +"`: " + convertToGbString(objRelationState.support || 0) + "\n";
 	if (objRelationState.s2a)
-		announcement += "Current asset attributed to `" + symbol + "`: `" + objRelationState.s2a + "`\n";
+		announcement += "Symbol is `" + symbol + "` attributed to asset : `" + objRelationState.s2a + "`\n";
 
 	if (objRelationState.competing_symbols.length){
 		announcement += "Competing symbols: \n";
@@ -169,15 +169,21 @@ async function getNewRelationStateAnnouncement(asset, symbol){
 	}
 
 	if (objRelationState.asset_expiry){
-		announcement += "Asset challenge period expires in " + moment().to(moment.unix(objRelationState.asset_expiry)) + "\n";
+		let expiryMoment = moment.unix(objRelationState.asset_expiry);
+		if (expiryMoment.isAfter(moment()))
+			announcement += "Asset dispute period expires " + moment().to(expiryMoment) + "\n";
 	}
 
 	if (objRelationState.symbol_expiry){
-		announcement += "Symbol challenge period expires in " + moment().to(moment.unix(objRelationState.symbol_expiry)) + "\n";
+		let expiryMoment = moment.unix(objRelationState.symbol_expiry);
+		if (expiryMoment.isAfter(moment()))
+			announcement += "Symbol dispute period expires " + moment().to(expiryMoment) + "\n";
 	}
 
 	if (objRelationState.grace_expiry){
-		announcement += "Symbol grace period expires in " + moment().to(moment.unix(objRelationState.grace_expiry)) + "\n";
+		let expiryMoment = moment.unix(objRelationState.grace_expiry);
+		if (expiryMoment.isAfter(moment()))
+			announcement += "Asset grace period expires " + moment().to(expiryMoment) + "\n";
 	}
 	return announcement;
 }
@@ -188,7 +194,7 @@ function getNewStateForRelation(asset, symbol){
 		getStateVarsForPrefixes(conf.token_registry_aa_address,
 			[
 				'support_',
-				'a2s_' + asset,
+				's2a_' + symbol,
 				'expiry_ts_' + asset,
 				'expiry_ts_' + symbol,
 				'grace_expiry_ts_'+ asset,
