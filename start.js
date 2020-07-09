@@ -1,23 +1,22 @@
 const conf = require('ocore/conf.js');
-const myWitnesses = require('ocore/my_witnesses.js');
 const network = require('ocore/network.js');
 const eventBus = require('ocore/event_bus.js');
 const lightWallet = require('ocore/light_wallet.js');
 const storage = require('ocore/storage.js');
 const wallet_general = require('ocore/wallet_general.js');
 const Discord = require('discord.js');
-const discordChannels = process.env.testnet ? ["729547841801814157", "729169652030374030"] : []; // 729547841801814157 // 729169652030374030
 const moment = require('moment');
+const { strict } = require('assert');
 
 var discordClient = null;
-const MIN_AMOUNT = 1e8;
+const MIN_AMOUNT = 1e8; // constant from registry AA
 
-myWitnesses.readMyWitnesses(function (arrWitnesses) {
-	if (arrWitnesses.length > 0)
-		return start();
-	myWitnesses.insertWitnesses(conf.initial_witnesses, start);
-}, 'ignore');
 
+lightWallet.setLightVendorHost(conf.hub);
+
+eventBus.on('connected', function(ws){
+	network.initWitnessesIfNecessary(ws, start);
+});
 
 
 eventBus.on('aa_response', function(objResponse){
@@ -29,16 +28,17 @@ eventBus.on('aa_response', function(objResponse){
 		if (!objTriggerUnit)
 			throw Error('trigger unit not found ' + objResponse.trigger_unit);
 
+		// we get data and amount in bytes sent to registry AA
 		const data = getUnitData(objTriggerUnit);
 		const byte_amount = getByteAmountToRegistryAA(objTriggerUnit);
 
+		// we follow same logic as AA and treat the first case that is found true
 		if (data.withdraw && data.amount && data.asset && data.symbol)
 			return announceRemovedSupport(objResponse.trigger_address, data.amount, data.asset, data.symbol);
 
 		if (data.description && typeof data.decimals !== 'undefined' && (data.asset || data.symbol) && byte_amount < MIN_AMOUNT){
-			console.log(objResponse);
 			if (objResponse.response.responseVars && objResponse.response.responseVars['updated_support'])
-				return announceChangedDescription(objResponse.trigger_address, data.asset, data.symbol);
+				return announceDescription(objResponse.trigger_address, data.asset, data.symbol);
 			else
 				return console.log('ignored unchanged description');
 		}
@@ -48,16 +48,15 @@ eventBus.on('aa_response', function(objResponse){
 
 		if (byte_amount >= MIN_AMOUNT && data.asset && data.symbol){
 			announceAddedSupport(objResponse.trigger_address, byte_amount, data.asset, data.symbol, data.drawer);
-
+				// description may also have been set
 			if (data.description && typeof data.decimals !== 'undefined')
-				announceChangedDescription(objResponse.trigger_address, data.asset, data.symbol);
+				announceDescription(objResponse.trigger_address, data.asset, data.symbol);
 				return;
 		}
 		return console.log('no case for: ' +  byte_amount +  ' ' + JSON.stringify(data))
 	});
 
 });
-
 
 function getByteAmountToRegistryAA(objTriggerUnit){
 	let amount = 0;
@@ -84,8 +83,8 @@ function getUnitData(objTriggerUnit){
 }
 
 
-async function announceChangedDescription(author, asset, symbol){
-
+async function announceDescription(author, asset, symbol){
+	// we need first to find the linked symbol or the linked asset if it wasn't specified in data
 	if (!symbol)
 		try {
 			const objStateVars = await getStateVarsForPrefix(conf.token_registry_aa_address, 'a2s_' + asset);
@@ -103,93 +102,121 @@ async function announceChangedDescription(author, asset, symbol){
 			return console.log("Couldn't get state vars: " + err);
 		}
 
-		try {
-			const objStateVars = await getStateVarsForPrefix(conf.token_registry_aa_address, 'current_desc_' + asset);
-			var desc_hash = objStateVars['current_desc_' + asset];
-			console.log("found current_desc_: " + desc_hash);
-		} catch(err){
-			return console.log("Couldn't get state vars: " + err);
-		}
-
-		getStateVarsForPrefixes(conf.token_registry_aa_address,['desc_' + desc_hash, 'decimals_' + desc_hash],
-			function(err, objStateVars){
-				if (err)
-					return console.log("Couldn't get state vars: " + err);
-
-				const description = objStateVars['desc_' + desc_hash];
-				const decimal = objStateVars['decimals_' + desc_hash];
-
-				var announcement = author + " changed description for  `" + symbol + "`\n" + "Description: `" + description+ "`\nDecimals:`" + decimal+ "`\n";
-				console.log(announcement);
-				sendToDiscord(announcement);
-				
-			})
-
-
+	// we get the hash of the current description
+	try { 
+		const objStateVars = await getStateVarsForPrefix(conf.token_registry_aa_address, 'current_desc_' + asset);
+		var desc_hash = objStateVars['current_desc_' + asset];
+		console.log("found current_desc_: " + desc_hash);
+	} catch(err){
+		return console.log("Couldn't get state vars: " + err);
 	}
 
+	// from the description hash we find the description and the number of decimals
+	getStateVarsForPrefixes(conf.token_registry_aa_address,['desc_' + desc_hash, 'decimals_' + desc_hash],
+		function(err, objStateVars){
+			if (err)
+				return console.log("Couldn't get state vars: " + err);
 
+			const description = objStateVars['desc_' + desc_hash];
+			const decimal = objStateVars['decimals_' + desc_hash];
+
+			const objEmbed = new Discord.MessageEmbed()
+			.setColor('#0099ff')
+			.setTitle(author + " changed description for " + symbol)
+			.addFields(
+				{ name: "Description", value: description, inline: true  },
+				{ name: "Decimals", value: decimal, inline: true });
+		
+			sendToDiscord(objEmbed);
+		}
+	)
+}
 
 
 async function announceAddedSupport(author, amount, asset, symbol, drawer){
+
+	const objRelationStates = await getStatesForRelation(asset, symbol);
+
 	var lockTime = drawer ? " locked for " + drawer + " day" : "";
 	if (drawer && drawer > 1)
 		lockTime+="s";
-	var announcement = author + " adds " + convertToGbString(amount) + " to supporting symbol `" + symbol + "` for `" + asset+ "`" + lockTime +"\n";
-	announcement += await getNewRelationStateAnnouncement(asset, symbol);
-	sendToDiscord(announcement);
+
+	const objEmbed = new Discord.MessageEmbed()
+	.setColor('#0099ff')
+	.setTitle(author + " adds " + convertToGbString(amount) + " in support for " + symbol + lockTime)
+	.addFields(
+		{ name: "Supported asset", value: asset, inline: true  },
+		{ name: "Total Stake", value: convertToGbString(objRelationStates.support || 0), inline: true },
+		{ name: '\u200B', value: '\u200B' , inline: true }); // empty column to create a new row
+	
+	addRelationStatesInfo(objRelationStates, objEmbed, asset, symbol);
+
+	sendToDiscord(objEmbed);
+
 }
 
 async function announceRemovedSupport(author, amount, asset, symbol){
-	var announcement = author + " withdraws " + convertToGbString(amount) + " from supporting symbol `" + symbol + "` for `" + asset + "`\n";
-	announcement += await getNewRelationStateAnnouncement(asset, symbol);
-	sendToDiscord(announcement);
+
+	const objRelationStates = await getStatesForRelation(asset, symbol);
+
+	const objEmbed = new Discord.MessageEmbed()
+	.setColor('#0099ff')
+	.setTitle(author + " removes " + convertToGbString(amount) + " from support for " + symbol)
+	.addFields(
+		{ name: "Unsupported asset", value: asset, inline: true  },
+		{ name: "Total Stake", value: convertToGbString(objRelationStates.support || 0), inline: true },
+		{ name: '\u200B', value: '\u200B' , inline: true 	}); // empty column to create a new row
+
+	addRelationStatesInfo(objRelationStates, objEmbed, asset, symbol);
+
+	sendToDiscord(objEmbed);
 }
 
-async function getNewRelationStateAnnouncement(asset, symbol){
-	const objRelationState = await getNewStateForRelation(asset, symbol);
-	console.log(objRelationState);
-	var announcement = "";
-	announcement += "Support for attributing symbol `" + symbol + "` to `" + asset +"`: " + convertToGbString(objRelationState.support || 0) + "\n";
-	if (objRelationState.s2a)
-		announcement += "Symbol is `" + symbol + "` attributed to asset : `" + objRelationState.s2a + "`\n";
-
-	if (objRelationState.competing_symbols.length){
-		announcement += "Competing symbols: \n";
-		objRelationState.competing_symbols.forEach(function (competing_symbol){
-			announcement += "`" + competing_symbol.symbol + "`: " + convertToGbString(competing_symbol.amount) + "\n";
-		});
+function addRelationStatesInfo(objRelationStates, objEmbed, asset, symbol){
+	
+	if (objRelationStates.competing_symbols.length){
+		objEmbed.addFields(
+			{ name: "Competing symbol", value: objRelationStates.competing_symbols.map(s => s.symbol), inline: true },
+			{ name: "Stake", value: objRelationStates.competing_symbols.map(s => convertToGbString(s.amount)), inline: true },
+			{ name: '\u200B', value: '\u200B' ,	 inline: true } // empty column to create a new row
+		)
+	}
+	if (objRelationStates.competing_assets.length){
+		objEmbed.addFields(
+			{ name: "Competing asset", value: objRelationStates.competing_assets.map(a => a.asset), inline: true },
+			{ name: "Stake", value: objRelationStates.competing_assets.map(a => convertToGbString(a.amount)), inline: true },
+			{ name: '\u200B', value: '\u200B' ,	 inline: true } // empty column to create a new row
+		)
 	}
 
-	if (objRelationState.competing_assets.length){
-		announcement += "Competing assets: \n";
-		objRelationState.competing_assets.forEach(function (competing_asset){
-			announcement += "`" + competing_asset.asset + "`: "+ convertToGbString(competing_asset.amount) + "\n";
-		});
-	}
+	var footer = "";
 
-	if (objRelationState.asset_expiry){
-		let expiryMoment = moment.unix(objRelationState.asset_expiry);
+	if (objRelationStates.s2a)
+		footer += "Symbol `" + symbol + "` is attributed to asset " + objRelationStates.s2a + "\n";
+
+	if (objRelationStates.asset_expiry){
+		let expiryMoment = moment.unix(objRelationStates.asset_expiry);
 		if (expiryMoment.isAfter(moment()))
-			announcement += "Asset dispute period expires " + moment().to(expiryMoment) + "\n";
+		footer += "Asset dispute period expires " + moment().to(expiryMoment) + "\n";
 	}
 
-	if (objRelationState.symbol_expiry){
-		let expiryMoment = moment.unix(objRelationState.symbol_expiry);
+	if (objRelationStates.symbol_expiry){
+		let expiryMoment = moment.unix(objRelationStates.symbol_expiry);
 		if (expiryMoment.isAfter(moment()))
-			announcement += "Symbol dispute period expires " + moment().to(expiryMoment) + "\n";
+		footer += "Symbol dispute period expires " + moment().to(expiryMoment) + "\n";
 	}
 
-	if (objRelationState.grace_expiry){
-		let expiryMoment = moment.unix(objRelationState.grace_expiry);
+	if (objRelationStates.grace_expiry){
+		let expiryMoment = moment.unix(objRelationStates.grace_expiry);
 		if (expiryMoment.isAfter(moment()))
-			announcement += "Asset grace period expires " + moment().to(expiryMoment) + "\n";
+		footer += "Asset grace period expires " + moment().to(expiryMoment) + "\n";
 	}
-	return announcement;
+	if (footer.length)
+		objEmbed.setFooter(footer)
 }
 
 
-function getNewStateForRelation(asset, symbol){
+function getStatesForRelation(asset, symbol){
 	return new Promise(function(resolve){
 		getStateVarsForPrefixes(conf.token_registry_aa_address,
 			[
@@ -204,7 +231,7 @@ function getNewStateForRelation(asset, symbol){
 					console.log("Couldn't get state vars: " + err);
 					return resolve(null);
 				}
-				const objRelationState = { 
+				const objRelationStates = { 
 					competing_symbols: [],
 					competing_assets: [],
 				};
@@ -212,37 +239,37 @@ function getNewStateForRelation(asset, symbol){
 				for (var key in objStateVars){
 					if (key.indexOf('support_' + symbol) === 0){
 						if (key.slice(-44) !== asset)
-							objRelationState.competing_assets.push({asset: key.slice(-44), amount: objStateVars[key]});
+							objRelationStates.competing_assets.push({asset: key.slice(-44), amount: objStateVars[key]});
 						else
-							objRelationState.support = objStateVars[key];
+							objRelationStates.support = objStateVars[key];
 						continue;
 					}
 					if (key.indexOf('support_') === 0 && key.slice(-44) === asset){
 						if (key.slice(8,-44) !== symbol)
-							objRelationState.competing_symbols.push({symbol: key.slice(8,-45), amount: objStateVars[key]});
+							objRelationStates.competing_symbols.push({symbol: key.slice(8,-45), amount: objStateVars[key]});
 						continue;
 					}
 					if (key === 's2a_' + symbol){
-						objRelationState.s2a = objStateVars[key];
+						objRelationStates.s2a = objStateVars[key];
 						continue;
 					}
 					if (key === 'expiry_ts_' + asset){
-						objRelationState.asset_expiry = objStateVars[key];
+						objRelationStates.asset_expiry = objStateVars[key];
 						continue;
 					}
 					if (key === 'expiry_ts_' + symbol){
-						objRelationState.symbol_expiry = objStateVars[key];
+						objRelationStates.symbol_expiry = objStateVars[key];
 						continue;
 					}
 					if (key === 'grace_expiry_ts_' + asset){
-						objRelationState.grace_expiry = objStateVars[key];
+						objRelationStates.grace_expiry = objStateVars[key];
 						continue;
 					}
 				}
-				objRelationState.competing_assets.sort((a,b) => b.amount - a.amount);
-				objRelationState.competing_symbols.sort((a,b) => b.amount - a.amount);
+				objRelationStates.competing_assets.sort((a,b) => b.amount - a.amount);
+				objRelationStates.competing_symbols.sort((a,b) => b.amount - a.amount);
 
-				return resolve(objRelationState);
+				return resolve(objRelationStates);
 		});
 	});
 }
@@ -251,9 +278,10 @@ function convertToGbString (amount){
 	return (amount/1e9 >=1 ? ((amount/1e9).toPrecision(6)/1).toLocaleString(): ((amount/1e9).toPrecision(6)/1)) + ' GB'
 }
 
-eventBus.on('connected', function(){
-//	network.addLightWatchedAa(conf.token_registry_aa_address);
 
+
+async function start(){
+	await initDiscord();
 	wallet_general.addWatchedAddress(conf.token_registry_aa_address, function(error){
 		if (error)
 			console.log(error)
@@ -261,20 +289,15 @@ eventBus.on('connected', function(){
 			console.log(conf.token_registry_aa_address + " added as watched address")
 
 	});
-});
-
-
-async function start(){
-	lightWallet.setLightVendorHost(conf.hub);
 	setInterval(lightWallet.refreshLightClientHistory, 60*1000);
-
-	await initDiscord();
 }
 
 
 async function initDiscord(){
 	if (!conf.discord_token)
 		throw Error("discord_token missing in conf");
+	if (!conf.discord_channels || !conf.discord_channels.length)
+		throw Error("channels missing in conf");
 	discordClient = new Discord.Client();
 	discordClient.on('ready', () => {
 		console.log(`Logged in Discord as ${discordClient.user.tag}!`);
@@ -286,15 +309,13 @@ async function initDiscord(){
 }
 	
 
-function sendToDiscord(text){
+function sendToDiscord(to_be_sent){
 	if (!discordClient)
 		return console.log("discord client not initialized");
-	discordChannels.forEach(function(channel){
-		try {
-			discordClient.channels.get(channel).send(text);
-		} catch(e) {
-			console.log("couldn't get channel " + channel + ", reason: " + e);
-		}
+	conf.discord_channels.forEach(function(channelId){
+			discordClient.channels.fetch(channelId).then(function(channel){
+				channel.send(to_be_sent);
+			});
 	});
 }
 
@@ -344,3 +365,6 @@ function getStateVarsForPrefix(aa_address, prefix, start = '0', end = 'z', first
 		});
 	});
 }
+
+
+process.on('unhandledRejection', up => { throw up });
