@@ -6,7 +6,6 @@ const storage = require('ocore/storage.js');
 const wallet_general = require('ocore/wallet_general.js');
 const Discord = require('discord.js');
 const moment = require('moment');
-const { strict } = require('assert');
 
 var discordClient = null;
 const MIN_AMOUNT = 1e8; // constant from registry AA
