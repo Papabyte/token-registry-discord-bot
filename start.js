@@ -305,6 +305,7 @@ async function initDiscord(){
 		console.log(`Discord error: ${error}`);
 	});
 	await discordClient.login(conf.discord_token);
+	discordClient.user.setActivity(conf.token_registry_aa_address + " watching"); 
 }
 	
 
