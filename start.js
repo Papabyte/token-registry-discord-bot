@@ -305,9 +305,14 @@ async function initDiscord(){
 		console.log(`Discord error: ${error}`);
 	});
 	await discordClient.login(conf.discord_token);
-	discordClient.user.setActivity(conf.token_registry_aa_address + " watching"); 
+	setBotActivity();
+	setInterval(setBotActivity, 1000 * 60 * 24);
 }
-	
+
+function setBotActivity(){
+	discordClient.user.setActivity(conf.token_registry_aa_address , {type: "WATCHING"}); 
+}
+
 
 function sendToDiscord(to_be_sent){
 	if (!discordClient)
